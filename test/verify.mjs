@@ -7,6 +7,39 @@ import { chromium } from "playwright-core";
 
 const root = fileURLToPath(new URL("../public/", import.meta.url));
 const fixture = fileURLToPath(new URL("fixture.mp4", import.meta.url));
+const u32 = (n) => {
+  const bytes = Buffer.alloc(4);
+  bytes.writeUInt32BE(n);
+  return bytes;
+};
+const box = (type, ...parts) => {
+  const body = Buffer.concat(parts);
+  return Buffer.concat([u32(8 + body.length), Buffer.isBuffer(type) ? type : Buffer.from(type), body]);
+};
+// The fixture keeps moov after mdat, as iPhone files do, so growing moov moves no sample data.
+async function shotOn(lensModel, focal35) {
+  const tags = {
+    "com.apple.quicktime.camera.lens_model": lensModel,
+    "com.apple.quicktime.camera.focal_length.35mm_equivalent": focal35,
+  };
+  const meta = box(
+    "meta",
+    box("hdlr", Buffer.alloc(8), Buffer.from("mdta"), Buffer.alloc(12)),
+    box("keys", u32(0), u32(2), ...Object.keys(tags).map((key) => box("mdta", Buffer.from(key)))),
+    box("ilst", ...Object.values(tags).map((value, i) => box(u32(i + 1), box("data", u32(1), u32(0), Buffer.from(value))))),
+  );
+  const video = await readFile(fixture);
+  const type = (at) => video.toString("latin1", at + 4, at + 8);
+  const next = (at) => at + video.readUInt32BE(at);
+  let moov = 0;
+  while (type(moov) !== "moov") moov = next(moov);
+  let trak = moov + 8;
+  while (type(trak) !== "trak") trak = next(trak);
+  const buffer = Buffer.concat([video.subarray(0, next(trak)), meta, video.subarray(next(trak))]);
+  buffer.writeUInt32BE(video.readUInt32BE(moov) + meta.length, moov);
+  buffer.writeUInt32BE(video.readUInt32BE(trak) + meta.length, trak);
+  return { name: "shot.mp4", mimeType: "video/mp4", buffer };
+}
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -252,7 +285,36 @@ try {
   await ios.getByLabel("Video").setInputFiles(fixture);
   await eventually(thumbMatchesReference, "the thumbnail shows the reference frame after a video is picked");
   check(await ios.locator("#thumb").isVisible(), "the thumbnail replaces the placeholder");
+
+  const zoom = () => ios.locator("#cam").evaluate((el) => new DOMMatrix(getComputedStyle(el).transform).a);
+  await ios.getByLabel("Video").setInputFiles(await shotOn("iPhone back triple camera 6.765mm f/1.78", "28"));
+  await eventually(
+    async () => (await requested()).endsWith(",back-camera") && (await activeLens("1.2×")),
+    "a video shot at 28 mm opens Back Camera and shows 1.2× active",
+  );
+  check(Math.abs((await zoom()) - 28 / 24) < 0.01, "the camera view is zoomed by 28/24 to match the shot");
   if (process.env.SCREENSHOT) await ios.screenshot({ path: process.env.SCREENSHOT });
+
+  await ios.locator("#stage").evaluate((stage) => {
+    const fire = (type, pointerId, clientX) =>
+      stage.dispatchEvent(new PointerEvent(type, { pointerId, clientX, clientY: 300, bubbles: true }));
+    fire("pointerdown", 1, 150);
+    fire("pointerdown", 2, 200);
+    fire("pointermove", 2, 250);
+    fire("pointerup", 1, 150);
+    fire("pointerup", 2, 250);
+  });
+  await eventually(() => activeLens("2.3×"), "pinching two fingers to twice their distance doubles the zoom to 2.3×");
+  check(Math.abs((await zoom()) - 56 / 24) < 0.01, "the camera view follows the pinch");
+  await ios.reload();
+  await eventually(() => activeLens("2.3×"), "the zoom is restored after reload");
+
+  await ios.getByLabel("Video").setInputFiles(await shotOn("iPhone front camera 2.69mm f/1.9", "24"));
+  await eventually(
+    async () => (await requested()).endsWith(",front-camera") && !(await lensRow(ios).isVisible()),
+    "a video from the front camera opens Front Camera",
+  );
+  check(Math.abs((await zoom()) - 1) < 0.01, "a 24 mm front camera video leaves the view unzoomed");
 
   await context.setOffline(true);
   server.close();

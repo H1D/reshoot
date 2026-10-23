@@ -20,9 +20,10 @@
       -webkit-user-select: none;
       user-select: none;
     }
-    #stage { position: relative; isolation: isolate; overflow: hidden; width: 100vw; height: 100dvh; }
+    #stage { position: relative; isolation: isolate; overflow: hidden; width: 100vw; height: 100dvh; touch-action: none; }
     #stage.framed { width: min(100vw, 100dvh * var(--aspect)); height: min(100dvh, 100vw / var(--aspect)); }
     #cam, #ref { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    #cam { transform: scale(var(--zoom)); }
     #ref { opacity: var(--opacity); }
     #stage[data-mode="diff"] #ref { mix-blend-mode: difference; }
     #stage[data-mode="invert"] #ref { filter: invert(1); }
@@ -105,11 +106,15 @@
   </div>
   <script>
     const MODES = { ghost: "Ghost", diff: "Diff", invert: "Invert", contrast: "Contrast", edges: "Edges" };
+    // ponytail: 35mm-equivalent focal lengths of the Pro iPhone lenses, and 24 mm for the front and any unknown camera.
+    // Other models are off by a few mm, which pinch corrects.
     const LENSES = [
-      { label: ".5", name: "Back Ultra Wide Camera" },
-      { label: "1", name: "Back Camera" },
-      { label: "5", name: "Back Telephoto Camera" },
+      { label: ".5", name: "Back Ultra Wide Camera", mm: 13 },
+      { label: "1", name: "Back Camera", mm: 24 },
+      { label: "5", name: "Back Telephoto Camera", mm: 120 },
     ];
+    const MAIN_MM = 24;
+    const MAX_ZOOM = 10;
     const FRONT = "Front Camera";
     const MAX_SIDE = 1280;
     const EDGE_THRESHOLD = 100;
@@ -128,7 +133,7 @@
     const scratch = document.createElement("canvas");
     const scratchCtx = scratch.getContext("2d", { willReadFrequently: true });
 
-    const settings = { deviceId: null, backId: null, mode: "ghost", opacity: 0.5, ...JSON.parse(localStorage.getItem("reshoot")) };
+    const settings = { deviceId: null, backId: null, mode: "ghost", opacity: 0.5, zoom: 1, ...JSON.parse(localStorage.getItem("reshoot")) };
     let frame = null;
     let source = null;
     let stream = null;
@@ -151,6 +156,7 @@
     function apply() {
       stage.dataset.mode = settings.mode;
       stage.style.setProperty("--opacity", settings.opacity);
+      stage.style.setProperty("--zoom", settings.zoom);
       opacity.value = settings.opacity;
       for (const button of modes.children) button.setAttribute("aria-pressed", button.dataset.mode === settings.mode);
     }
@@ -225,6 +231,65 @@
       }
     }
 
+    const text = (view, at, length) => new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + at, length));
+
+    function* boxes(view, start, end) {
+      for (let at = start; at + 8 <= end; ) {
+        const size = view.getUint32(at);
+        if (size < 8) return;
+        yield [text(view, at + 4, 4), at + 8, at + size];
+        at += size;
+      }
+    }
+
+    function* metaTags(view, start, end) {
+      for (const [type, from, to] of boxes(view, start, end)) {
+        if (type === "trak") yield* metaTags(view, from, to);
+        if (type !== "meta") continue;
+        // A QuickTime meta box starts straight with hdlr; an ISO one has a version field first.
+        const body = text(view, from + 4, 4) === "hdlr" ? from : from + 4;
+        const kids = Object.fromEntries([...boxes(view, body, to)].map(([kid, a, b]) => [kid, [a, b]]));
+        if (!kids.keys || !kids.ilst) continue;
+        const names = [...boxes(view, kids.keys[0] + 8, kids.keys[1])].map(([, a, b]) => text(view, a, b - a));
+        for (const [, item, itemEnd] of boxes(view, ...kids.ilst)) {
+          const [, data, dataEnd] = boxes(view, item, itemEnd).next().value;
+          yield [names[view.getUint32(item - 4) - 1], text(view, data + 8, dataEnd - data - 8)];
+        }
+      }
+    }
+
+    // iPhones tag the video track with the lens and its 35mm-equivalent focal length.
+    async function readShot(videoFile) {
+      for (let at = 0; at + 8 <= videoFile.size; ) {
+        const head = new DataView(await videoFile.slice(at, at + 16).arrayBuffer());
+        const size = head.getUint32(0) === 1 ? Number(head.getBigUint64(8)) : head.getUint32(0);
+        if (text(head, 4, 4) === "moov") {
+          const moov = new DataView(await videoFile.slice(at, at + size).arrayBuffer());
+          const tags = Object.fromEntries(metaTags(moov, 8, moov.byteLength));
+          const mm = Number(tags["com.apple.quicktime.camera.focal_length.35mm_equivalent"]);
+          return mm > 0 ? { front: /front/i.test(tags["com.apple.quicktime.camera.lens_model"]), mm } : null;
+        }
+        if (size < 8) return null;
+        at += size;
+      }
+      return null;
+    }
+
+    function setZoom(zoom) {
+      update({ zoom: Math.min(MAX_ZOOM, Math.max(1, zoom)) });
+      showLenses();
+    }
+
+    function matchShot({ front, mm }) {
+      const lens = front
+        ? { id: frontId ?? active, mm: MAIN_MM }
+        : lenses.findLast((candidate) => candidate.mm <= mm) ?? lenses[0] ?? { id: active, mm: MAIN_MM };
+      setZoom(mm / lens.mm);
+      if (lens.id === active) return;
+      update(front ? { deviceId: lens.id } : { deviceId: lens.id, backId: lens.id });
+      startCamera();
+    }
+
     async function loadVideo(videoFile) {
       if (source) {
         source.onseeked = null;
@@ -256,13 +321,22 @@
       time.value = 0;
       timeRow.hidden = false;
       drawSource();
+      readShot(videoFile).then(
+        (shot) => shot && matchShot(shot),
+        (error) => console.warn("Reshoot could not read the camera tags", error),
+      );
     }
 
     const backLensId = () =>
       (lenses.find((lens) => lens.id === settings.backId) ?? lenses.find((lens) => lens.label === "1") ?? lenses[0])?.id;
 
     function showLenses() {
-      for (const button of lensRow.children) button.setAttribute("aria-pressed", button.value === active);
+      for (const button of lensRow.children) {
+        const lens = lenses.find((candidate) => candidate.id === button.value);
+        const on = lens.id === active;
+        button.setAttribute("aria-pressed", on);
+        button.textContent = on ? String(+((lens.mm * settings.zoom) / MAIN_MM).toFixed(1)).replace(/^0\./, ".") : lens.label;
+      }
       lensRow.hidden = !lenses.some((lens) => lens.id === active);
       flip.hidden = inputs.length < 2;
     }
@@ -291,7 +365,7 @@
             ...lenses.map(({ label, id }) => {
               const button = Object.assign(document.createElement("button"), { type: "button", textContent: label, value: id });
               button.onclick = () => {
-                update({ deviceId: id, backId: id });
+                update({ deviceId: id, backId: id, zoom: 1 });
                 startCamera();
               };
               return button;
@@ -325,9 +399,22 @@
     opacity.oninput = () => update({ opacity: Number(opacity.value) });
     flip.onclick = () => {
       const order = lenses.length ? [frontId, backLensId()] : inputs.map((device) => device.deviceId);
-      update({ deviceId: order[(order.indexOf(active) + 1) % order.length] });
+      update({ deviceId: order[(order.indexOf(active) + 1) % order.length], zoom: 1 });
       startCamera();
     };
+    const pointers = new Map();
+    const spread = () => {
+      const [a, b] = pointers.values();
+      return pointers.size === 2 ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+    };
+    stage.onpointerdown = (event) => pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    stage.onpointermove = (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      const before = spread();
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (before) setZoom((settings.zoom * spread()) / before);
+    };
+    stage.onpointerup = stage.onpointercancel = (event) => pointers.delete(event.pointerId);
     file.onchange = () => file.files[0] && loadVideo(file.files[0]);
     time.oninput = () => seek(Number(time.value));
     addEventListener("dragover", (event) => event.preventDefault());
