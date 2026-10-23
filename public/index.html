@@ -39,6 +39,7 @@
       pointer-events: none;
     }
     #notes p { max-width: 22em; margin: 6px 0; }
+    #notes button { padding: 0 20px; border-radius: 22px; background: rgb(255 255 255 / 0.16); pointer-events: auto; }
     .framed #hint { display: none; }
     #bar {
       position: fixed;
@@ -71,7 +72,17 @@
     input[type="range"] { width: 100%; height: 32px; margin: 0; accent-color: #fff; }
     #timeRow { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
     #controls { display: grid; grid-template-columns: 52px 1fr 52px; align-items: center; gap: 20px; }
-    .pick { position: relative; display: grid; place-items: center; height: 52px; overflow: hidden; border-radius: 10px; background: rgb(255 255 255 / 0.16); }
+    .pick {
+      position: relative;
+      display: grid;
+      place-items: center;
+      box-sizing: border-box;
+      height: 52px;
+      overflow: hidden;
+      border: 2px solid rgb(255 255 255 / 0.8);
+      border-radius: 10px;
+      background: rgb(255 255 255 / 0.16);
+    }
     .pick::before { content: "+"; font-size: 30px; font-weight: 300; }
     .pick > * { position: absolute; inset: 0; width: 100%; height: 100%; }
     #thumb { object-fit: cover; }
@@ -86,6 +97,7 @@
     <div id="notes">
       <p id="err" hidden></p>
       <p id="badVideo" hidden>This video can't be opened here. Pick an MP4 or a MOV from your camera roll.</p>
+      <button id="tapToShow" type="button" hidden>Tap to show the video</button>
       <p id="hint">Tap + to pick a reference video, then move the phone until the two pictures line up.</p>
     </div>
   </div>
@@ -134,8 +146,8 @@
       NotReadableError: "The camera is busy in another app.",
     };
 
-    const [stage, cam, ref, thumb, err, badVideo, file, lensRow, flip, modes, opacity, time, timeRow, now, total] =
-      "stage cam ref thumb err badVideo file lensRow flip modes opacity time timeRow now total".split(" ").map((id) => document.getElementById(id));
+    const [stage, cam, ref, thumb, err, badVideo, tapToShow, file, lensRow, flip, modes, opacity, time, timeRow, now, total] =
+      "stage cam ref thumb err badVideo tapToShow file lensRow flip modes opacity time timeRow now total".split(" ").map((id) => document.getElementById(id));
     const refCtx = ref.getContext("2d");
     const thumbCtx = thumb.getContext("2d");
     const scratch = document.createElement("canvas");
@@ -364,7 +376,7 @@
       startCamera();
     }
 
-    async function loadVideo(videoFile) {
+    function loadVideo(videoFile) {
       if (source) {
         source.onseeked = null;
         URL.revokeObjectURL(source.src);
@@ -379,10 +391,26 @@
       seeking = false;
       nextTime = null;
       badVideo.hidden = true;
-      // iOS Safari draws nothing from a video until playback has presented a frame. That frame is frame 0, and
-      // seeking back to where the video already is leaves the next seek's frame stale, so draw it directly.
+      tapToShow.hidden = true;
+      timeRow.hidden = true;
+      showFirstFrame(videoFile);
+    }
+
+    // iOS Safari draws nothing from a video until playback has presented a frame. That frame is frame 0, and
+    // seeking back to where the video already is leaves the next seek's frame stale, so draw it directly.
+    // iOS can also refuse to play without a tap, Low Power Mode for one, and then there is no frame to draw.
+    async function showFirstFrame(videoFile) {
       const presented = new Promise((resolve) => source.requestVideoFrameCallback(resolve));
-      if (await source.play().then(() => true, () => false)) await presented;
+      const outcome = await source.play().then(() => "played", (error) => error.name);
+      if (outcome === "NotAllowedError") {
+        tapToShow.onclick = () => {
+          tapToShow.hidden = true;
+          showFirstFrame(videoFile);
+        };
+        tapToShow.hidden = false;
+        return;
+      }
+      if (outcome === "played") await presented;
       source.pause();
       if (!source.error && Number.isNaN(source.duration)) {
         await new Promise((resolve) => Object.assign(source, { onloadedmetadata: resolve, onerror: resolve }));
