@@ -258,7 +258,7 @@
       }
     }
 
-    // iPhones tag the video track with the lens and its 35mm-equivalent focal length.
+    // iPhones tag the video track with the lens and its 35mm-equivalent focal length, digital zoom included.
     async function readShot(videoFile) {
       for (let at = 0; at + 8 <= videoFile.size; ) {
         const head = new DataView(await videoFile.slice(at, at + 16).arrayBuffer());
