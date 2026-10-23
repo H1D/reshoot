@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.png">
+  <link rel="apple-touch-icon" href="icon.png">
+  <title>Reshoot</title>
+  <style>
+    [hidden] { display: none !important; }
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #000; color: #fff; }
+    body {
+      display: grid;
+      place-items: center;
+      font: 15px/1.3 -apple-system, system-ui, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #stage { position: relative; isolation: isolate; overflow: hidden; width: 100vw; height: 100dvh; }
+    #stage.framed { width: min(100vw, 100dvh * var(--aspect)); height: min(100dvh, 100vw / var(--aspect)); }
+    #cam, #ref { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    #ref { opacity: var(--opacity); }
+    #stage[data-mode="diff"] #ref { mix-blend-mode: difference; }
+    #stage[data-mode="invert"] #ref { filter: invert(1); }
+    #stage[data-mode="contrast"] :is(#cam, #ref) { filter: grayscale(1) contrast(3); }
+    #notes {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 24px;
+      text-align: center;
+      text-shadow: 0 1px 4px #000;
+      pointer-events: none;
+    }
+    #notes p { max-width: 22em; margin: 6px 0; }
+    .framed #hint { display: none; }
+    #bar {
+      position: fixed;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+      background: rgb(0 0 0 / 0.5);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+    }
+    #bar button, #bar select, .pick {
+      min-height: 44px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 10px;
+      background: rgb(255 255 255 / 0.16);
+      color: inherit;
+      font: inherit;
+    }
+    .pick { position: relative; display: inline-flex; align-items: center; font-weight: 600; }
+    .pick input { position: absolute; inset: 0; opacity: 0; }
+    #cams { flex: 1 1 140px; min-width: 0; }
+    #modes { display: flex; flex: 1 1 340px; gap: 2px; }
+    #modes button { flex: 1; padding: 0; border-radius: 0; }
+    #modes button:first-child { border-radius: 10px 0 0 10px; }
+    #modes button:last-child { border-radius: 0 10px 10px 0; }
+    #modes [aria-pressed="true"] { background: #fff; color: #000; }
+    .row { display: flex; flex: 1 1 300px; align-items: center; gap: 12px; }
+    .row span { width: 4.5em; }
+    .row input { flex: 1; height: 32px; margin: 0; accent-color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video id="cam" autoplay muted playsinline></video>
+    <canvas id="ref"></canvas>
+    <div id="notes">
+      <p id="err" hidden></p>
+      <p id="hint">Pick a reference video, then move the phone until the two pictures line up.</p>
+    </div>
+  </div>
+  <div id="bar">
+    <label class="pick">Video<input id="file" type="file" accept="video/*"></label>
+    <select id="cams" aria-label="Camera" hidden></select>
+    <div id="modes" role="group" aria-label="Overlay mode"></div>
+    <label class="row"><span>Opacity</span><input id="opacity" type="range" min="0" max="1" step="0.01"></label>
+    <label class="row" id="timeRow" hidden><span>Frame</span><input id="time" type="range" min="0" step="any" value="0"></label>
+  </div>
+  <script>
+    const MODES = { ghost: "Ghost", diff: "Diff", invert: "Invert", contrast: "Contrast", edges: "Edges" };
+    const MAX_SIDE = 1280;
+    const EDGE_THRESHOLD = 100;
+    const LIME = [128, 255, 0, 255];
+    const ENVIRONMENT = { facingMode: "environment" };
+    const CAMERA_ERRORS = {
+      NotAllowedError: "Camera access was denied. Allow it in Settings, then reopen Reshoot.",
+      NotFoundError: "No camera found on this device.",
+      NotReadableError: "The camera is busy in another app.",
+    };
+
+    const [stage, cam, ref, err, file, cams, modes, opacity, time, timeRow] =
+      "stage cam ref err file cams modes opacity time timeRow".split(" ").map((id) => document.getElementById(id));
+    const refCtx = ref.getContext("2d");
+    const scratch = document.createElement("canvas");
+    const scratchCtx = scratch.getContext("2d", { willReadFrequently: true });
+
+    const settings = { deviceId: null, mode: "ghost", opacity: 0.5, ...JSON.parse(localStorage.getItem("reshoot")) };
+    let frame = null;
+    let source = null;
+    let stream = null;
+    let seeking = false;
+    let nextTime = null;
+    let saveWhenIdle = false;
+
+    function save(key, value) {
+      try {
+        localStorage.setItem(key, value);
+      } catch (error) {
+        console.warn(`Reshoot could not save ${key}`, error);
+      }
+    }
+
+    function apply() {
+      stage.dataset.mode = settings.mode;
+      stage.style.setProperty("--opacity", settings.opacity);
+      opacity.value = settings.opacity;
+      for (const button of modes.children) button.setAttribute("aria-pressed", button.dataset.mode === settings.mode);
+    }
+
+    function update(patch) {
+      Object.assign(settings, patch);
+      save("reshoot", JSON.stringify(settings));
+      apply();
+    }
+
+    function edgeMap({ data, width: w, height: h }) {
+      const lum = new Float32Array(w * h);
+      for (let i = 0; i < lum.length; i++) lum[i] = 0.299 * data[4 * i] + 0.587 * data[4 * i + 1] + 0.114 * data[4 * i + 2];
+      const out = new ImageData(w, h);
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x;
+          const gx = lum[i - w + 1] + 2 * lum[i + 1] + lum[i + w + 1] - lum[i - w - 1] - 2 * lum[i - 1] - lum[i + w - 1];
+          const gy = lum[i + w - 1] + 2 * lum[i + w] + lum[i + w + 1] - lum[i - w - 1] - 2 * lum[i - w] - lum[i - w + 1];
+          if (gx * gx + gy * gy > EDGE_THRESHOLD ** 2) out.data.set(LIME, 4 * i);
+        }
+      }
+      return out;
+    }
+
+    function render() {
+      if (!frame) return;
+      ref.width = frame.width;
+      ref.height = frame.height;
+      refCtx.putImageData(settings.mode === "edges" ? edgeMap(frame) : frame, 0, 0);
+    }
+
+    function setFrame(image, width, height) {
+      const scale = Math.min(1, MAX_SIDE / Math.max(width, height));
+      scratch.width = Math.round(width * scale);
+      scratch.height = Math.round(height * scale);
+      scratchCtx.drawImage(image, 0, 0, scratch.width, scratch.height);
+      frame = scratchCtx.getImageData(0, 0, scratch.width, scratch.height);
+      stage.style.setProperty("--aspect", width / height);
+      stage.classList.add("framed");
+      render();
+    }
+
+    const saveFrame = () => save("reshoot-frame", scratch.toDataURL("image/jpeg", 0.85));
+
+    function seek(t) {
+      if (seeking) {
+        nextTime = t;
+        return;
+      }
+      seeking = true;
+      source.currentTime = t;
+    }
+
+    function onSeeked() {
+      setFrame(source, source.videoWidth, source.videoHeight);
+      if (nextTime !== null) {
+        source.currentTime = nextTime;
+        nextTime = null;
+        return;
+      }
+      seeking = false;
+      if (saveWhenIdle) {
+        saveWhenIdle = false;
+        saveFrame();
+      }
+    }
+
+    async function loadVideo(videoFile) {
+      if (source) {
+        source.onseeked = null;
+        URL.revokeObjectURL(source.src);
+      }
+      source = Object.assign(document.createElement("video"), {
+        muted: true,
+        playsInline: true,
+        preload: "auto",
+        src: URL.createObjectURL(videoFile),
+        onseeked: onSeeked,
+      });
+      seeking = false;
+      nextTime = null;
+      saveWhenIdle = true;
+      // iOS Safari will not draw a video frame into a canvas until playback has started once.
+      await source.play();
+      source.pause();
+      time.max = source.duration;
+      time.value = 0;
+      timeRow.hidden = false;
+      seek(0);
+    }
+
+    async function startCamera() {
+      stream?.getTracks().forEach((track) => track.stop());
+      const open = (video) =>
+        navigator.mediaDevices.getUserMedia({ audio: false, video: { ...video, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+      try {
+        stream = await open(settings.deviceId ? { deviceId: { exact: settings.deviceId } } : ENVIRONMENT).catch((error) => {
+          if (error.name !== "OverconstrainedError") throw error;
+          return open(ENVIRONMENT);
+        });
+        cam.srcObject = stream;
+        err.hidden = true;
+        const current = stream.getVideoTracks()[0].getSettings().deviceId;
+        const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
+        cams.replaceChildren(
+          ...inputs.map((device, i) => new Option(device.label || `Camera ${i + 1}`, device.deviceId, false, device.deviceId === current)),
+        );
+        cams.hidden = false;
+      } catch (error) {
+        err.textContent = !navigator.mediaDevices
+          ? "The camera needs a secure (https) connection."
+          : CAMERA_ERRORS[error.name] ?? `Camera unavailable: ${error.message}`;
+        err.hidden = false;
+      }
+    }
+
+    for (const [mode, label] of Object.entries(MODES)) {
+      const button = Object.assign(document.createElement("button"), { type: "button", textContent: label });
+      button.dataset.mode = mode;
+      button.onclick = () => {
+        update({ mode });
+        render();
+      };
+      modes.append(button);
+    }
+    opacity.oninput = () => update({ opacity: Number(opacity.value) });
+    cams.onchange = () => {
+      update({ deviceId: cams.value });
+      startCamera();
+    };
+    file.onchange = () => file.files[0] && loadVideo(file.files[0]);
+    time.oninput = () => seek(Number(time.value));
+    time.onchange = () => (seeking ? (saveWhenIdle = true) : saveFrame());
+    addEventListener("dragover", (event) => event.preventDefault());
+    addEventListener("drop", (event) => {
+      event.preventDefault();
+      const dropped = event.dataTransfer.files[0];
+      if (dropped?.type.startsWith("video/")) loadVideo(dropped);
+    });
+
+    apply();
+    const storedFrame = localStorage.getItem("reshoot-frame");
+    if (storedFrame) {
+      const image = new Image();
+      image.onload = () => setFrame(image, image.naturalWidth, image.naturalHeight);
+      image.src = storedFrame;
+    }
+    startCamera();
+    navigator.serviceWorker?.register("sw.js");
+  </script>
+</body>
+</html>
