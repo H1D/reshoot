@@ -1,0 +1,11 @@
+{
+  "name": "reshoot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "node test/verify.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1"
+  }
+}
