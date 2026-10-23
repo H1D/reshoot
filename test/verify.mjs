@@ -116,6 +116,18 @@ await iphone.addInitScript(
   },
   { devices: iphoneCameras, virtualId: deviceId("Back Triple Camera") },
 );
+// iOS refuses play() outside a tap in some states, Low Power Mode among them. This checks for a trusted click rather
+// than navigator.userActivation, which Playwright's own evaluate calls set, setInputFiles included.
+const lowPower = await browser.newContext({ viewport: { width: 390, height: 844 } });
+await lowPower.addInitScript(() => {
+  const play = HTMLMediaElement.prototype.play;
+  window.refusedPlays = 0;
+  HTMLMediaElement.prototype.play = function () {
+    if (window.event?.isTrusted && window.event.type === "click") return play.call(this);
+    window.refusedPlays++;
+    return Promise.reject(new DOMException("play() needs a user gesture", "NotAllowedError"));
+  };
+});
 
 const problems = [];
 function watch(page) {
@@ -380,6 +392,29 @@ try {
   await screenshot(live, "reshoot-edges-shifted.png");
   check(matched < shifted / 10, `a camera lined up with the reference hides the lines (${matched} lime px vs ${shifted} shifted)`);
   check(shifted > all / 4, `a camera 24 px off shows the lines again (${shifted} lime px, ${all} with a black camera)`);
+
+  const lowPowerPage = watch(await lowPower.newPage());
+  const tapToShow = lowPowerPage.getByRole("button", { name: "Tap to show the video" });
+  const lowPowerSlider = lowPowerPage.getByRole("slider", { name: "Frame" });
+  const storedFrame = () => lowPowerPage.evaluate(() => localStorage.getItem("reshoot-frame"));
+  await lowPowerPage.goto(`http://127.0.0.1:${server.address().port}/`);
+  await lowPowerPage.getByLabel("Video").setInputFiles(fixture);
+  await lowPowerPage.waitForTimeout(1000);
+  check((await lowPowerPage.evaluate(() => window.refusedPlays)) > 0, "picking a video without a tap gets play() refused");
+  check((await storedFrame()) === null, "a refused play saves no frame");
+  check(await tapToShow.isVisible(), "a refused play asks for a tap to show the video");
+  check(!(await lowPowerSlider.isVisible()), "the frame slider stays hidden while the video is not shown");
+  await screenshot(lowPowerPage, "reshoot-tap-prompt.png");
+  await tapToShow.click();
+  check(!(await tapToShow.isVisible()), "the tap prompt goes away once tapped");
+  await lowPowerPage.getByRole("button", { name: "Ghost", exact: true }).click();
+  await eventually(async () => !blank(await canvas(lowPowerPage)), "the tap shows the reference frame");
+  check(await lowPowerSlider.isVisible(), "the frame slider shows after the tap");
+  check(await lowPowerPage.locator("#thumb").isVisible(), "the thumbnail shows after the tap");
+  await eventually(async () => (await storedFrame()) !== null, "the frame shown after the tap is saved");
+  await lowPowerPage.getByLabel("Video").setInputFiles({ name: "again.mp4", mimeType: "video/mp4", buffer: await readFile(fixture) });
+  await eventually(() => tapToShow.isVisible(), "picking another video without a tap asks for a tap again");
+  check(!(await lowPowerSlider.isVisible()), "the previous video's frame slider hides until the new video shows");
 
   await context.setOffline(true);
   server.close();
