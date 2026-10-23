@@ -110,6 +110,7 @@ function watch(page) {
   return page;
 }
 const page = watch(await context.newPage());
+const screenshot = (on, name) => process.env.SCREENSHOT_DIR && on.screenshot({ path: join(process.env.SCREENSHOT_DIR, name) });
 
 function check(condition, message) {
   assert.ok(condition, message);
@@ -144,6 +145,7 @@ const distance = (a, b) => a.sample.reduce((sum, v, i) => sum + Math.abs(v - b.s
 const stageAspect = () =>
   page.locator("#stage").evaluate((el) => el.getBoundingClientRect().width / el.getBoundingClientRect().height);
 const style = (selector, property) => page.locator(selector).evaluate((el, p) => getComputedStyle(el)[p], property);
+const timeText = (id) => page.locator(`#${id}`).textContent();
 const stageMode = () => page.locator("#stage").getAttribute("data-mode");
 const setSlider = (slider, value) =>
   slider.evaluate((el, v) => {
@@ -174,6 +176,8 @@ try {
   const frame0 = await canvas();
   check(Math.abs((await stageAspect()) / (16 / 9) - 1) < 0.01, "stage takes the 16:9 aspect of the reference");
   check(await frameSlider.isVisible(), "frame slider is visible once a video is loaded");
+  check((await timeText("now")) === "0:00.00", "the current time reads 0:00.00 once a video is loaded");
+  check((await timeText("total")) === "0:03.00", "the duration reads 0:03.00 for the 3 s fixture");
   check(
     !(await flipButton(page).isVisible()) && !(await lensRow(page).isVisible()),
     "a single camera with non-iOS labels shows no flip button and no lens pills",
@@ -182,6 +186,9 @@ try {
   await setSlider(frameSlider, "2");
   await eventually(async () => distance(await canvas(), frame0) > 5, "moving the frame slider to 2s redraws the canvas");
   const frame2 = await canvas();
+  check((await timeText("now")) === "0:02.00", "the current time follows the slider to 0:02.00");
+  check((await frameSlider.getAttribute("aria-valuetext")) === "0:02.00", "the slider announces 0:02.00 to screen readers");
+  await screenshot(page, "reshoot-timestamps.png");
 
   const seeksBefore = await page.evaluate(() => window.seekCount);
   await frameSlider.evaluate((el) => {
@@ -293,7 +300,7 @@ try {
     "a video shot at 28 mm opens Back Camera and shows 1.2× active",
   );
   check(Math.abs((await zoom()) - 28 / 24) < 0.01, "the camera view is zoomed by 28/24 to match the shot");
-  if (process.env.SCREENSHOT) await ios.screenshot({ path: process.env.SCREENSHOT });
+  await screenshot(ios, "reshoot-lens-zoom.png");
 
   await ios.locator("#stage").evaluate((stage) => {
     const fire = (type, pointerId, clientX) =>

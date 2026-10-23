@@ -71,6 +71,7 @@
     #modes button { padding: 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
     #modes [aria-pressed="true"] { color: #ffd60a; }
     input[type="range"] { width: 100%; height: 32px; margin: 0; accent-color: #fff; }
+    #timeRow { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
     #controls { display: grid; grid-template-columns: 52px 1fr 52px; align-items: center; gap: 20px; }
     .pick { position: relative; display: grid; place-items: center; height: 52px; overflow: hidden; border-radius: 10px; background: rgb(255 255 255 / 0.16); }
     .pick::before { content: "+"; font-size: 30px; font-weight: 300; }
@@ -93,7 +94,11 @@
   <div id="bar">
     <div id="lensRow" role="group" aria-label="Lens" hidden></div>
     <div id="modes" role="group" aria-label="Overlay mode"></div>
-    <div id="timeRow" hidden><input id="time" type="range" aria-label="Frame" min="0" step="any" value="0"></div>
+    <div id="timeRow" hidden>
+      <span id="now"></span>
+      <input id="time" type="range" aria-label="Frame" min="0" step="any" value="0">
+      <span id="total"></span>
+    </div>
     <div id="controls">
       <label class="pick"><canvas id="thumb" hidden></canvas><input id="file" type="file" accept="video/*" aria-label="Video"></label>
       <input id="opacity" type="range" aria-label="Opacity" min="0" max="1" step="0.01">
@@ -126,8 +131,8 @@
       NotReadableError: "The camera is busy in another app.",
     };
 
-    const [stage, cam, ref, thumb, err, badVideo, file, lensRow, flip, modes, opacity, time, timeRow] =
-      "stage cam ref thumb err badVideo file lensRow flip modes opacity time timeRow".split(" ").map((id) => document.getElementById(id));
+    const [stage, cam, ref, thumb, err, badVideo, file, lensRow, flip, modes, opacity, time, timeRow, now, total] =
+      "stage cam ref thumb err badVideo file lensRow flip modes opacity time timeRow now total".split(" ").map((id) => document.getElementById(id));
     const refCtx = ref.getContext("2d");
     const thumbCtx = thumb.getContext("2d");
     const scratch = document.createElement("canvas");
@@ -165,6 +170,17 @@
       Object.assign(settings, patch);
       save("reshoot", JSON.stringify(settings));
       apply();
+    }
+
+    function stamp(t) {
+      // The epsilon keeps float products like 0.29 * 100 = 28.999... from flooring a centisecond short.
+      const cs = Math.floor(t * 100 + 1e-6);
+      return `${Math.floor(cs / 6000)}:${String(Math.floor(cs / 100) % 60).padStart(2, "0")}.${String(cs % 100).padStart(2, "0")}`;
+    }
+
+    function showTime() {
+      now.textContent = stamp(time.value);
+      time.setAttribute("aria-valuetext", now.textContent);
     }
 
     function edgeMap({ data, width: w, height: h }) {
@@ -319,6 +335,8 @@
       }
       time.max = source.duration;
       time.value = 0;
+      showTime();
+      total.textContent = stamp(source.duration);
       timeRow.hidden = false;
       drawSource();
       readShot(videoFile).then(
@@ -416,7 +434,10 @@
     };
     stage.onpointerup = stage.onpointercancel = (event) => pointers.delete(event.pointerId);
     file.onchange = () => file.files[0] && loadVideo(file.files[0]);
-    time.oninput = () => seek(Number(time.value));
+    time.oninput = () => {
+      showTime();
+      seek(Number(time.value));
+    };
     addEventListener("dragover", (event) => event.preventDefault());
     addEventListener("drop", (event) => {
       event.preventDefault();
