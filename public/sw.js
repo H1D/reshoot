@@ -1,4 +1,4 @@
-const CACHE = "reshoot-v2";
+const CACHE = "reshoot-v3";
 const ASSETS = ["./", "index.html", "manifest.webmanifest", "icon.png"];
 
 self.addEventListener("install", (event) => {

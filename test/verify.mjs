@@ -86,6 +86,20 @@ const iphoneCameras = ["Front Camera", "Back Camera", "Back Ultra Wide Camera", 
   deviceId: deviceId(label),
   groupId: "",
 }));
+const matching = await browser.newContext({ viewport: { width: 390, height: 844 } });
+await matching.addInitScript(() => {
+  navigator.mediaDevices.getUserMedia = async () => {
+    const feed = Object.assign(document.createElement("canvas"), { width: 1280, height: 720 });
+    const ctx = feed.getContext("2d");
+    (function paint() {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, feed.width, feed.height);
+      if (window.camSource) ctx.drawImage(window.camSource, window.camShift ?? 0, 0);
+      requestAnimationFrame(paint);
+    })();
+    return feed.captureStream(30);
+  };
+});
 const iphone = await browser.newContext({ viewport: { width: 390, height: 844 } });
 await iphone.addInitScript(
   ({ devices, virtualId }) => {
@@ -126,8 +140,8 @@ async function eventually(probe, message, timeout = 10_000) {
   assert.fail(message);
 }
 
-const canvas = () =>
-  page.locator("#ref").evaluate((el) => {
+const canvas = (on = page) =>
+  on.locator("#ref").evaluate((el) => {
     const { data } = el.getContext("2d").getImageData(0, 0, el.width, el.height);
     let visible = 0;
     let lit = 0;
@@ -164,6 +178,10 @@ const modeButton = (name) => page.getByRole("button", { name, exact: true });
 
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  check((await stageMode()) === "edges", "a fresh install starts in Edges mode");
+  const modeNames = [...(await page.getByRole("group", { name: "Overlay mode" }).ariaSnapshot()).matchAll(/button "([^"]+)"/g)];
+  check(modeNames.map(([, name]) => name).join() === "Ghost,Contrast,Edges", "the modes are exactly Ghost, Contrast and Edges");
+  await modeButton("Ghost").click();
 
   await eventually(() => page.locator("#cam").evaluate((el) => el.videoWidth > 0), "camera video plays");
   check(!(await frameSlider.isVisible()), "frame slider is hidden before a video is picked");
@@ -211,16 +229,12 @@ try {
 
   const expected = {
     Ghost: "ghost",
-    Diff: "diff",
-    Invert: "invert",
     Contrast: "contrast",
     Edges: "edges",
   };
   for (const [name, mode] of Object.entries(expected)) {
     await modeButton(name).click();
     check((await stageMode()) === mode, `${name} button sets #stage[data-mode=${mode}]`);
-    if (mode === "diff") check((await style("#ref", "mixBlendMode")) === "difference", "diff blends the reference by difference");
-    if (mode === "invert") check((await style("#ref", "filter")).includes("invert"), "invert filters the reference with invert");
     if (mode === "contrast") check((await style("#cam", "filter")).includes("grayscale"), "contrast puts a grayscale filter on the camera");
     if (mode === "edges") {
       const edges = await canvas();
@@ -295,6 +309,7 @@ try {
   check((await requested()) === "back-ultra-wide-camera", "after reload Back Ultra Wide Camera is the only camera requested");
 
   check(!(await ios.locator("#thumb").isVisible()), "the thumbnail shows the placeholder while no reference exists");
+  await ios.getByRole("button", { name: "Ghost", exact: true }).click();
   await ios.getByLabel("Video").setInputFiles(fixture);
   await eventually(thumbMatchesReference, "the thumbnail shows the reference frame after a video is picked");
   check(await ios.locator("#thumb").isVisible(), "the thumbnail replaces the placeholder");
@@ -329,12 +344,49 @@ try {
   );
   check(Math.abs((await zoom()) - 1) < 0.01, "a 24 mm front camera video leaves the view unzoomed");
 
+  const live = watch(await matching.newPage());
+  const cameraFrames = (count) =>
+    live.locator("#cam").evaluate(
+      (el, n) =>
+        new Promise((resolve) => {
+          const tick = () => (--n ? el.requestVideoFrameCallback(tick) : resolve());
+          el.requestVideoFrameCallback(tick);
+        }),
+      count,
+    );
+  const limeAfterFrames = async () => {
+    await cameraFrames(10);
+    return (await canvas(live)).lime;
+  };
+  await live.goto(`http://127.0.0.1:${server.address().port}/`);
+  await live.evaluate(() => localStorage.setItem("reshoot", JSON.stringify({ mode: "diff" })));
+  await live.reload();
+  check((await live.locator("#stage").getAttribute("data-mode")) === "edges", "a stored mode that no longer exists falls back to Edges");
+  await live.getByLabel("Video").setInputFiles(fixture);
+  await live.getByRole("button", { name: "Ghost", exact: true }).click();
+  await eventually(async () => !blank(await canvas(live)), "the matching camera page shows frame 0 in Ghost");
+  await live.evaluate(() => {
+    const ref = document.getElementById("ref");
+    window.frame0 = Object.assign(document.createElement("canvas"), { width: ref.width, height: ref.height });
+    window.frame0.getContext("2d").drawImage(ref, 0, 0);
+  });
+  await live.getByRole("button", { name: "Edges", exact: true }).click();
+  const all = await limeAfterFrames();
+  await live.evaluate(() => (window.camSource = window.frame0));
+  const matched = await limeAfterFrames();
+  await screenshot(live, "reshoot-edges-matched.png");
+  await live.evaluate(() => (window.camShift = 24));
+  const shifted = await limeAfterFrames();
+  await screenshot(live, "reshoot-edges-shifted.png");
+  check(matched < shifted / 10, `a camera lined up with the reference hides the lines (${matched} lime px vs ${shifted} shifted)`);
+  check(shifted > all / 4, `a camera 24 px off shows the lines again (${shifted} lime px, ${all} with a black camera)`);
+
   await context.setOffline(true);
   server.close();
   server.closeAllConnections();
   const offline = await page.reload().catch(() => null);
   check(offline?.ok() && (await page.title()) === "Reshoot", "app loads offline from the service worker cache");
-  check((await page.getByRole("group", { name: "Overlay mode" }).getByRole("button").count()) === 5, "mode buttons render offline");
+  check((await page.getByRole("group", { name: "Overlay mode" }).getByRole("button").count()) === 3, "mode buttons render offline");
   await eventually(async () => !blank(await canvas()), "stored frame renders offline");
 
   assert.deepEqual(problems, [], "no page errors or console errors during the run");

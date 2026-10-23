@@ -25,8 +25,6 @@
     #cam, #ref { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
     #cam { transform: scale(var(--zoom)); }
     #ref { opacity: var(--opacity); }
-    #stage[data-mode="diff"] #ref { mix-blend-mode: difference; }
-    #stage[data-mode="invert"] #ref { filter: invert(1); }
     #stage[data-mode="contrast"] :is(#cam, #ref) { filter: grayscale(1) contrast(3); }
     #notes {
       position: absolute;
@@ -110,7 +108,7 @@
     </div>
   </div>
   <script>
-    const MODES = { ghost: "Ghost", diff: "Diff", invert: "Invert", contrast: "Contrast", edges: "Edges" };
+    const MODES = { ghost: "Ghost", contrast: "Contrast", edges: "Edges" };
     // ponytail: 35mm-equivalent focal lengths of the Pro iPhone lenses, and 24 mm for the front and any unknown camera.
     // Other models are off by a few mm, which pinch corrects.
     const LENSES = [
@@ -122,7 +120,12 @@
     const MAX_ZOOM = 10;
     const FRONT = "Front Camera";
     const MAX_SIDE = 1280;
+    const EDGE_SIDE = 640;
+    // ponytail: calibration knobs, checked on one synthetic scene only. The live threshold sits lower so a weaker camera
+    // edge under different exposure still counts as a match, and the radius (px at EDGE_SIDE) is how far off it may sit.
     const EDGE_THRESHOLD = 100;
+    const MATCH_THRESHOLD = 60;
+    const MATCH_RADIUS = 2;
     const LIME = [128, 255, 0, 255];
     const ENVIRONMENT = { facingMode: "environment" };
     const CAMERA_ERRORS = {
@@ -137,9 +140,13 @@
     const thumbCtx = thumb.getContext("2d");
     const scratch = document.createElement("canvas");
     const scratchCtx = scratch.getContext("2d", { willReadFrequently: true });
+    const edgeCanvas = document.createElement("canvas");
+    const edgeCtx = edgeCanvas.getContext("2d", { willReadFrequently: true });
 
-    const settings = { deviceId: null, backId: null, mode: "ghost", opacity: 0.5, zoom: 1, ...JSON.parse(localStorage.getItem("reshoot")) };
+    const settings = { deviceId: null, backId: null, opacity: 0.5, zoom: 1, ...JSON.parse(localStorage.getItem("reshoot")) };
+    if (!Object.hasOwn(MODES, settings.mode)) settings.mode = "edges";
     let frame = null;
+    let refEdges = null;
     let source = null;
     let stream = null;
     let active = null;
@@ -183,26 +190,71 @@
       time.setAttribute("aria-valuetext", now.textContent);
     }
 
-    function edgeMap({ data, width: w, height: h }) {
+    function edgeMask({ data, width: w, height: h }, threshold) {
       const lum = new Float32Array(w * h);
       for (let i = 0; i < lum.length; i++) lum[i] = 0.299 * data[4 * i] + 0.587 * data[4 * i + 1] + 0.114 * data[4 * i + 2];
-      const out = new ImageData(w, h);
+      const mask = new Uint8Array(w * h);
       for (let y = 1; y < h - 1; y++) {
         for (let x = 1; x < w - 1; x++) {
           const i = y * w + x;
           const gx = lum[i - w + 1] + 2 * lum[i + 1] + lum[i + w + 1] - lum[i - w - 1] - 2 * lum[i - 1] - lum[i + w - 1];
           const gy = lum[i + w - 1] + 2 * lum[i + w] + lum[i + w + 1] - lum[i - w - 1] - 2 * lum[i - w] - lum[i - w + 1];
-          if (gx * gx + gy * gy > EDGE_THRESHOLD ** 2) out.data.set(LIME, 4 * i);
+          mask[i] = gx * gx + gy * gy > threshold ** 2;
         }
+      }
+      return mask;
+    }
+
+    // Spreads each set pixel along its row, then its column, rather than scanning every window, since most of the mask is empty.
+    function dilate(mask, w, h, r) {
+      const rows = new Uint8Array(mask.length);
+      for (let i = 0; i < mask.length; i++) {
+        const x = i % w;
+        if (mask[i]) rows.fill(1, i - Math.min(x, r), i + Math.min(w - 1 - x, r) + 1);
+      }
+      const out = new Uint8Array(mask.length);
+      for (let i = 0; i < rows.length; i++) {
+        if (!rows[i]) continue;
+        for (let j = Math.max(i % w, i - r * w); j < Math.min(rows.length, i + (r + 1) * w); j += w) out[j] = 1;
       }
       return out;
     }
 
+    // Samples the camera in the geometry the user sees, a cover crop to the stage aspect divided by the zoom.
+    function cameraEdges(w, h) {
+      const { videoWidth: vw, videoHeight: vh } = cam;
+      if (!vw) return null;
+      let sw = vw;
+      let sh = vh;
+      if (vw / vh > w / h) sw = (vh * w) / h;
+      else sh = (vw * h) / w;
+      sw /= settings.zoom;
+      sh /= settings.zoom;
+      edgeCtx.drawImage(cam, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, w, h);
+      return dilate(edgeMask(edgeCtx.getImageData(0, 0, w, h), MATCH_THRESHOLD), w, h, MATCH_RADIUS);
+    }
+
+    function drawEdges() {
+      const { width, height, mask } = refEdges;
+      const live = cameraEdges(width, height);
+      const out = new ImageData(width, height);
+      for (let i = 0; i < mask.length; i++) if (mask[i] && !live?.[i]) out.data.set(LIME, 4 * i);
+      ref.width = width;
+      ref.height = height;
+      refCtx.putImageData(out, 0, 0);
+    }
+
     function render() {
       if (!frame) return;
+      if (settings.mode === "edges") return drawEdges();
       ref.width = frame.width;
       ref.height = frame.height;
-      refCtx.putImageData(settings.mode === "edges" ? edgeMap(frame) : frame, 0, 0);
+      refCtx.putImageData(frame, 0, 0);
+    }
+
+    function watchCamera() {
+      cam.requestVideoFrameCallback(watchCamera);
+      if (settings.mode === "edges" && refEdges) drawEdges();
     }
 
     function setFrame(image, width, height) {
@@ -211,6 +263,12 @@
       scratch.height = Math.round(height * scale);
       scratchCtx.drawImage(image, 0, 0, scratch.width, scratch.height);
       frame = scratchCtx.getImageData(0, 0, scratch.width, scratch.height);
+      const edgeScale = Math.min(1, EDGE_SIDE / Math.max(width, height));
+      edgeCanvas.width = Math.round(width * edgeScale);
+      edgeCanvas.height = Math.round(height * edgeScale);
+      edgeCtx.drawImage(scratch, 0, 0, edgeCanvas.width, edgeCanvas.height);
+      const edges = edgeCtx.getImageData(0, 0, edgeCanvas.width, edgeCanvas.height);
+      refEdges = { width: edges.width, height: edges.height, mask: edgeMask(edges, EDGE_THRESHOLD) };
       thumb.width = scratch.width / 4;
       thumb.height = scratch.height / 4;
       thumbCtx.drawImage(scratch, 0, 0, thumb.width, thumb.height);
@@ -453,6 +511,7 @@
       image.src = storedFrame;
     }
     startCamera();
+    cam.requestVideoFrameCallback(watchCamera);
     navigator.serviceWorker?.register("sw.js");
   </script>
 </body>
