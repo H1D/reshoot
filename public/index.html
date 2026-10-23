@@ -24,6 +24,7 @@
     #stage.framed { width: min(100vw, 100dvh * var(--aspect)); height: min(100dvh, 100vw / var(--aspect)); }
     #cam, #ref { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
     #cam { transform: scale(var(--zoom)); }
+    #cam::-webkit-media-controls, #cam::-webkit-media-controls-start-playback-button { display: none !important; }
     #ref { opacity: var(--opacity); }
     #stage[data-mode="contrast"] :is(#cam, #ref) { filter: grayscale(1) contrast(3); }
     #notes {
@@ -40,7 +41,7 @@
     }
     #notes p { max-width: 22em; margin: 6px 0; }
     #notes button { padding: 0 20px; border-radius: 22px; background: rgb(255 255 255 / 0.16); pointer-events: auto; }
-    .framed #hint { display: none; }
+    .framed #hint, #tapToShow:not([hidden]) ~ #hint { display: none; }
     #bar {
       position: fixed;
       right: 0;
@@ -511,7 +512,11 @@
       const [a, b] = pointers.values();
       return pointers.size === 2 ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
     };
-    stage.onpointerdown = (event) => pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    stage.onpointerdown = (event) => {
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      // The iOS play button is hidden above, so a tap has to be able to start a camera that did not autoplay.
+      if (cam.paused && cam.srcObject) cam.play().catch(() => {});
+    };
     stage.onpointermove = (event) => {
       if (!pointers.has(event.pointerId)) return;
       const before = spread();
