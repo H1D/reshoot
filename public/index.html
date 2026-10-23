@@ -117,7 +117,7 @@
     let stream = null;
     let seeking = false;
     let nextTime = null;
-    let saveWhenIdle = false;
+    let saveTimer;
 
     function save(key, value) {
       try {
@@ -173,7 +173,11 @@
       render();
     }
 
-    const saveFrame = () => save("reshoot-frame", scratch.toDataURL("image/jpeg", 0.85));
+    function drawSource() {
+      setFrame(source, source.videoWidth, source.videoHeight);
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => save("reshoot-frame", scratch.toDataURL("image/jpeg", 0.85)), 300);
+    }
 
     function seek(t) {
       if (seeking) {
@@ -181,20 +185,18 @@
         return;
       }
       seeking = true;
+      // Safari can still hold the previous HDR frame at seeked; this redraws once the new frame is presented.
+      source.requestVideoFrameCallback(drawSource);
       source.currentTime = t;
     }
 
     function onSeeked() {
-      setFrame(source, source.videoWidth, source.videoHeight);
-      if (nextTime !== null) {
-        source.currentTime = nextTime;
-        nextTime = null;
-        return;
-      }
+      drawSource();
       seeking = false;
-      if (saveWhenIdle) {
-        saveWhenIdle = false;
-        saveFrame();
+      if (nextTime !== null) {
+        const t = nextTime;
+        nextTime = null;
+        seek(t);
       }
     }
 
@@ -212,10 +214,11 @@
       });
       seeking = false;
       nextTime = null;
-      saveWhenIdle = true;
       badVideo.hidden = true;
-      // iOS Safari will not draw a video frame into a canvas until playback has started once.
-      await source.play().catch(() => {});
+      // iOS Safari draws nothing from a video until playback has presented a frame. That frame is frame 0, and
+      // seeking back to where the video already is leaves the next seek's frame stale, so draw it directly.
+      const presented = new Promise((resolve) => source.requestVideoFrameCallback(resolve));
+      if (await source.play().then(() => true, () => false)) await presented;
       source.pause();
       if (!source.error && Number.isNaN(source.duration)) {
         await new Promise((resolve) => Object.assign(source, { onloadedmetadata: resolve, onerror: resolve }));
@@ -227,7 +230,7 @@
       time.max = source.duration;
       time.value = 0;
       timeRow.hidden = false;
-      seek(0);
+      drawSource();
     }
 
     async function startCamera() {
@@ -271,7 +274,6 @@
     };
     file.onchange = () => file.files[0] && loadVideo(file.files[0]);
     time.oninput = () => seek(Number(time.value));
-    time.onchange = () => (seeking ? (saveWhenIdle = true) : saveFrame());
     addEventListener("dragover", (event) => event.preventDefault());
     addEventListener("drop", (event) => {
       event.preventDefault();

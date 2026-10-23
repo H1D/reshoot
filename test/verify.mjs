@@ -128,6 +128,8 @@ try {
   await eventually(async () => distance(await canvas(), frame0) < 1, "a fast 20-step drag back to 0s ends on frame 0");
   const seeks = (await page.evaluate(() => window.seekCount)) - seeksBefore;
   check(seeks <= 2, `the fast drag coalesces into at most 2 seeks (issued ${seeks})`);
+  await setSlider(frameSlider, "2");
+  await eventually(async () => distance(await canvas(), frame2) < 1, "moving back to 2s shows the 2s frame again");
 
   const expected = {
     Ghost: "ghost",
@@ -156,10 +158,11 @@ try {
 
   await eventually(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller)), "service worker controls the page");
 
+  await page.waitForTimeout(400);
   await page.reload();
   await eventually(async () => !blank(await canvas()), "stored frame is restored after reload");
   const restored = await canvas();
-  check(distance(restored, frame2) < distance(restored, frame0), "restored frame is the 2s frame saved on slider change");
+  check(distance(restored, frame2) < distance(restored, frame0), "restored frame is the last frame shown (2s)");
   check(Math.abs((await stageAspect()) / (16 / 9) - 1) < 0.01, "restored stage keeps the 16:9 aspect");
   check((await stageMode()) === "contrast", "mode is restored after reload");
   check((await opacity.inputValue()) === "0.8" && (await style("#ref", "opacity")) === "0.8", "opacity is restored after reload");
