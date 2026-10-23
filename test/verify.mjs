@@ -32,11 +32,22 @@ const browser = await chromium.launch({
   args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
 });
 const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+await context.addInitScript(() => {
+  const currentTime = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime");
+  window.seekCount = 0;
+  Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+    ...currentTime,
+    set(value) {
+      window.seekCount++;
+      currentTime.set.call(this, value);
+    },
+  });
+});
 const page = await context.newPage();
 const problems = [];
 page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
 page.on("console", (message) => {
-  if (message.type() === "error") problems.push(`console error: ${message.text()}`);
+  if (message.type() === "error") problems.push(`console error: ${message.text()} at ${message.location().url}`);
 });
 
 function check(condition, message) {
@@ -102,6 +113,17 @@ try {
   await eventually(async () => distance(await canvas(), frame0) > 5, "moving the frame slider to 2s redraws the canvas");
   const frame2 = await canvas();
 
+  const seeksBefore = await page.evaluate(() => window.seekCount);
+  await frameSlider.evaluate((el) => {
+    for (let i = 19; i >= 0; i--) {
+      el.value = i / 10;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  await eventually(async () => distance(await canvas(), frame0) < 1, "a fast 20-step drag back to 0s ends on frame 0");
+  const seeks = (await page.evaluate(() => window.seekCount)) - seeksBefore;
+  check(seeks <= 2, `the fast drag coalesces into at most 2 seeks (issued ${seeks})`);
+
   const expected = {
     Ghost: "ghost",
     Diff: "diff",
@@ -141,8 +163,8 @@ try {
   await context.setOffline(true);
   server.close();
   server.closeAllConnections();
-  await page.reload();
-  check((await page.title()) === "Reshoot", "app loads offline from the service worker cache");
+  const offline = await page.reload().catch(() => null);
+  check(offline?.ok() && (await page.title()) === "Reshoot", "app loads offline from the service worker cache");
   check((await page.getByRole("group", { name: "Overlay mode" }).getByRole("button").count()) === 5, "mode buttons render offline");
   await eventually(async () => !blank(await canvas()), "stored frame renders offline");
 
