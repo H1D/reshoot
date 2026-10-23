@@ -82,6 +82,7 @@
     <canvas id="ref"></canvas>
     <div id="notes">
       <p id="err" hidden></p>
+      <p id="badVideo" hidden>This video can't be opened here. Pick an MP4 or a MOV from your camera roll.</p>
       <p id="hint">Pick a reference video, then move the phone until the two pictures line up.</p>
     </div>
   </div>
@@ -104,8 +105,8 @@
       NotReadableError: "The camera is busy in another app.",
     };
 
-    const [stage, cam, ref, err, file, cams, modes, opacity, time, timeRow] =
-      "stage cam ref err file cams modes opacity time timeRow".split(" ").map((id) => document.getElementById(id));
+    const [stage, cam, ref, err, badVideo, file, cams, modes, opacity, time, timeRow] =
+      "stage cam ref err badVideo file cams modes opacity time timeRow".split(" ").map((id) => document.getElementById(id));
     const refCtx = ref.getContext("2d");
     const scratch = document.createElement("canvas");
     const scratchCtx = scratch.getContext("2d", { willReadFrequently: true });
@@ -212,9 +213,17 @@
       seeking = false;
       nextTime = null;
       saveWhenIdle = true;
+      badVideo.hidden = true;
       // iOS Safari will not draw a video frame into a canvas until playback has started once.
-      await source.play();
+      await source.play().catch(() => {});
       source.pause();
+      if (!source.error && Number.isNaN(source.duration)) {
+        await new Promise((resolve) => Object.assign(source, { onloadedmetadata: resolve, onerror: resolve }));
+      }
+      if (source.error) {
+        badVideo.hidden = false;
+        return;
+      }
       time.max = source.duration;
       time.value = 0;
       timeRow.hidden = false;

@@ -103,7 +103,12 @@ try {
   await eventually(async () => (await camera.locator("option").count()) > 0, "camera select lists a device");
   check(!(await frameSlider.isVisible()), "frame slider is hidden before a video is picked");
 
+  await page.getByLabel("Video").setInputFiles({ name: "broken.mp4", mimeType: "video/mp4", buffer: Buffer.from("not a video") });
+  await eventually(() => page.locator("#badVideo").isVisible(), "an undecodable video shows an error instead of failing silently");
+  check(!(await frameSlider.isVisible()), "frame slider stays hidden after an undecodable video");
+
   await page.getByLabel("Video").setInputFiles(fixture);
+  check(!(await page.locator("#badVideo").isVisible()), "picking a good video clears the error");
   await eventually(async () => !blank(await canvas()), "reference canvas shows frame 0 after picking a video");
   const frame0 = await canvas();
   check(Math.abs((await stageAspect()) / (16 / 9) - 1) < 0.01, "stage takes the 16:9 aspect of the reference");
