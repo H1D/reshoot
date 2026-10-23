@@ -43,12 +43,40 @@ await context.addInitScript(() => {
     },
   });
 });
-const page = await context.newPage();
+const VIRTUAL = ["Back Dual Camera", "Back Dual Wide Camera", "Back Triple Camera"];
+const deviceId = (label) => label.toLowerCase().replaceAll(" ", "-");
+const iphoneCameras = ["Front Camera", "Back Camera", "Back Ultra Wide Camera", "Back Telephoto Camera", ...VIRTUAL].map((label) => ({
+  kind: "videoinput",
+  label,
+  deviceId: deviceId(label),
+  groupId: "",
+}));
+const iphone = await browser.newContext({ viewport: { width: 390, height: 844 } });
+await iphone.addInitScript(
+  ({ devices, virtualId }) => {
+    const media = navigator.mediaDevices;
+    const getUserMedia = media.getUserMedia.bind(media);
+    window.requested = [];
+    media.enumerateDevices = async () => devices;
+    media.getUserMedia = async ({ video }) => {
+      window.requested.push(video.deviceId?.exact ?? video.facingMode);
+      const stream = await getUserMedia({ video: true });
+      if (!video.deviceId) stream.getVideoTracks()[0].getSettings = () => ({ deviceId: virtualId });
+      return stream;
+    };
+  },
+  { devices: iphoneCameras, virtualId: deviceId("Back Triple Camera") },
+);
+
 const problems = [];
-page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
-page.on("console", (message) => {
-  if (message.type() === "error") problems.push(`console error: ${message.text()} at ${message.location().url}`);
-});
+function watch(page) {
+  page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
+  page.on("console", (message) => {
+    if (message.type() === "error") problems.push(`console error: ${message.text()} at ${message.location().url}`);
+  });
+  return page;
+}
+const page = watch(await context.newPage());
 
 function check(condition, message) {
   assert.ok(condition, message);
@@ -91,7 +119,8 @@ const setSlider = (slider, value) =>
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }, value);
 
-const camera = page.getByRole("combobox", { name: "Camera" });
+const flipButton = (on) => on.getByRole("button", { name: "Flip camera" });
+const lensRow = (on) => on.getByRole("group", { name: "Lens" });
 const opacity = page.getByRole("slider", { name: "Opacity" });
 const frameSlider = page.getByRole("slider", { name: "Frame" });
 const modeButton = (name) => page.getByRole("button", { name, exact: true });
@@ -100,7 +129,6 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
 
   await eventually(() => page.locator("#cam").evaluate((el) => el.videoWidth > 0), "camera video plays");
-  await eventually(async () => (await camera.locator("option").count()) > 0, "camera select lists a device");
   check(!(await frameSlider.isVisible()), "frame slider is hidden before a video is picked");
 
   await page.getByLabel("Video").setInputFiles({ name: "broken.mp4", mimeType: "video/mp4", buffer: Buffer.from("not a video") });
@@ -113,6 +141,10 @@ try {
   const frame0 = await canvas();
   check(Math.abs((await stageAspect()) / (16 / 9) - 1) < 0.01, "stage takes the 16:9 aspect of the reference");
   check(await frameSlider.isVisible(), "frame slider is visible once a video is loaded");
+  check(
+    !(await flipButton(page).isVisible()) && !(await lensRow(page).isVisible()),
+    "a single camera with non-iOS labels shows no flip button and no lens pills",
+  );
 
   await setSlider(frameSlider, "2");
   await eventually(async () => distance(await canvas(), frame0) > 5, "moving the frame slider to 2s redraws the canvas");
@@ -167,6 +199,60 @@ try {
   check((await stageMode()) === "contrast", "mode is restored after reload");
   check((await opacity.inputValue()) === "0.8" && (await style("#ref", "opacity")) === "0.8", "opacity is restored after reload");
   check(!(await frameSlider.isVisible()), "frame slider stays hidden with no video loaded");
+
+  const ios = watch(await iphone.newPage());
+  const requested = () => ios.evaluate(() => window.requested.join());
+  const activeLens = (name) => lensRow(ios).getByRole("button", { name, exact: true, pressed: true }).isVisible();
+  const thumbMatchesReference = () =>
+    ios.evaluate(() => {
+      const look = (el) => {
+        const ctx = Object.assign(document.createElement("canvas"), { width: 16, height: 9 }).getContext("2d");
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(el, 0, 0, 16, 9);
+        return ctx.getImageData(0, 0, 16, 9).data;
+      };
+      const thumb = look(document.getElementById("thumb"));
+      const reference = look(document.getElementById("ref"));
+      const lit = reference.filter((v, i) => i % 4 !== 3 && v > 20).length;
+      const diff = thumb.reduce((sum, v, i) => sum + Math.abs(v - reference[i]), 0) / thumb.length;
+      return lit > reference.length / 8 && diff < 1.2;
+    });
+  await ios.goto(`http://127.0.0.1:${server.address().port}/`);
+  await eventually(() => activeLens("1×"), "a first boot on a virtual iPhone camera ends on the Back Camera with 1× active");
+  check((await requested()) === "environment,back-camera", "the virtual camera from environment is replaced exactly once by Back Camera");
+  check((await lensRow(ios).getByRole("button").allTextContents()).join() === ".5,1,5", "the lens pills are .5, 1 and 5 in that order");
+  const dom = await ios.evaluate(() => {
+    const body = document.body.cloneNode(true);
+    body.querySelectorAll("script").forEach((script) => script.remove());
+    return body.outerHTML;
+  });
+  check(VIRTUAL.every((label) => !dom.includes(label) && !dom.includes(deviceId(label))), "no virtual multi-lens camera appears in the page");
+
+  await lensRow(ios).getByRole("button", { name: ".5" }).click();
+  await eventually(
+    async () => (await requested()).endsWith(",back-ultra-wide-camera") && (await activeLens(".5×")),
+    "tapping .5 opens Back Ultra Wide Camera and shows .5× active",
+  );
+  await flipButton(ios).click();
+  await eventually(
+    async () => (await requested()).endsWith(",front-camera") && !(await lensRow(ios).isVisible()),
+    "flip opens Front Camera and hides the lens pills",
+  );
+  await flipButton(ios).click();
+  await eventually(
+    async () => (await requested()).endsWith("front-camera,back-ultra-wide-camera") && (await activeLens(".5×")),
+    "flipping back opens the last back lens, Back Ultra Wide Camera",
+  );
+
+  await ios.reload();
+  await eventually(() => activeLens(".5×"), "after reload .5× is active");
+  check((await requested()) === "back-ultra-wide-camera", "after reload Back Ultra Wide Camera is the only camera requested");
+
+  check(!(await ios.locator("#thumb").isVisible()), "the thumbnail shows the placeholder while no reference exists");
+  await ios.getByLabel("Video").setInputFiles(fixture);
+  await eventually(thumbMatchesReference, "the thumbnail shows the reference frame after a video is picked");
+  check(await ios.locator("#thumb").isVisible(), "the thumbnail replaces the placeholder");
+  if (process.env.SCREENSHOT) await ios.screenshot({ path: process.env.SCREENSHOT });
 
   await context.setOffline(true);
   server.close();

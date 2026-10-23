@@ -46,34 +46,37 @@
       right: 0;
       bottom: 0;
       left: 0;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 10px max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+      display: grid;
+      gap: 6px;
+      padding: 4px max(20px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
       background: rgb(0 0 0 / 0.5);
       -webkit-backdrop-filter: blur(16px);
       backdrop-filter: blur(16px);
     }
-    #bar button, #bar select, .pick {
-      min-height: 44px;
-      padding: 0 14px;
-      border: 0;
-      border-radius: 10px;
-      background: rgb(255 255 255 / 0.16);
-      color: inherit;
-      font: inherit;
+    button { min-width: 44px; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; font: inherit; }
+    #lensRow { position: absolute; right: 0; bottom: 100%; left: 0; display: flex; justify-content: center; padding-bottom: 8px; }
+    #lensRow button {
+      box-sizing: border-box;
+      width: 44px;
+      border: 7px solid transparent;
+      border-radius: 50%;
+      background: rgb(44 44 46 / 0.8) padding-box;
+      font-size: 11px;
+      font-weight: 600;
     }
-    .pick { position: relative; display: inline-flex; align-items: center; font-weight: 600; }
-    .pick input { position: absolute; inset: 0; opacity: 0; }
-    #cams { flex: 1 1 140px; min-width: 0; }
-    #modes { display: flex; flex: 1 1 340px; gap: 2px; }
-    #modes button { flex: 1; padding: 0; border-radius: 0; }
-    #modes button:first-child { border-radius: 10px 0 0 10px; }
-    #modes button:last-child { border-radius: 0 10px 10px 0; }
-    #modes [aria-pressed="true"] { background: #fff; color: #000; }
-    .row { display: flex; flex: 1 1 300px; align-items: center; gap: 12px; }
-    .row span { width: 4.5em; }
-    .row input { flex: 1; height: 32px; margin: 0; accent-color: #fff; }
+    #lensRow [aria-pressed="true"] { border-width: 3px; color: #ffd60a; font-size: 13px; }
+    #lensRow [aria-pressed="true"]::after { content: "×"; }
+    #modes { display: flex; justify-content: center; }
+    #modes button { padding: 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+    #modes [aria-pressed="true"] { color: #ffd60a; }
+    input[type="range"] { width: 100%; height: 32px; margin: 0; accent-color: #fff; }
+    #controls { display: grid; grid-template-columns: 52px 1fr 52px; align-items: center; gap: 20px; }
+    .pick { position: relative; display: grid; place-items: center; height: 52px; overflow: hidden; border-radius: 10px; background: rgb(255 255 255 / 0.16); }
+    .pick::before { content: "+"; font-size: 30px; font-weight: 300; }
+    .pick > * { position: absolute; inset: 0; width: 100%; height: 100%; }
+    #thumb { object-fit: cover; }
+    #file { opacity: 0; }
+    #flip { display: grid; place-items: center; height: 52px; border-radius: 50%; background: rgb(255 255 255 / 0.16); }
   </style>
 </head>
 <body>
@@ -83,18 +86,31 @@
     <div id="notes">
       <p id="err" hidden></p>
       <p id="badVideo" hidden>This video can't be opened here. Pick an MP4 or a MOV from your camera roll.</p>
-      <p id="hint">Pick a reference video, then move the phone until the two pictures line up.</p>
+      <p id="hint">Tap + to pick a reference video, then move the phone until the two pictures line up.</p>
     </div>
   </div>
   <div id="bar">
-    <label class="pick">Video<input id="file" type="file" accept="video/*"></label>
-    <select id="cams" aria-label="Camera" hidden></select>
+    <div id="lensRow" role="group" aria-label="Lens" hidden></div>
     <div id="modes" role="group" aria-label="Overlay mode"></div>
-    <label class="row"><span>Opacity</span><input id="opacity" type="range" min="0" max="1" step="0.01"></label>
-    <label class="row" id="timeRow" hidden><span>Frame</span><input id="time" type="range" min="0" step="any" value="0"></label>
+    <div id="timeRow" hidden><input id="time" type="range" aria-label="Frame" min="0" step="any" value="0"></div>
+    <div id="controls">
+      <label class="pick"><canvas id="thumb" hidden></canvas><input id="file" type="file" accept="video/*" aria-label="Video"></label>
+      <input id="opacity" type="range" aria-label="Opacity" min="0" max="1" step="0.01">
+      <button id="flip" type="button" aria-label="Flip camera" hidden>
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5" />
+        </svg>
+      </button>
+    </div>
   </div>
   <script>
     const MODES = { ghost: "Ghost", diff: "Diff", invert: "Invert", contrast: "Contrast", edges: "Edges" };
+    const LENSES = [
+      { label: ".5", name: "Back Ultra Wide Camera" },
+      { label: "1", name: "Back Camera" },
+      { label: "5", name: "Back Telephoto Camera" },
+    ];
+    const FRONT = "Front Camera";
     const MAX_SIDE = 1280;
     const EDGE_THRESHOLD = 100;
     const LIME = [128, 255, 0, 255];
@@ -105,16 +121,21 @@
       NotReadableError: "The camera is busy in another app.",
     };
 
-    const [stage, cam, ref, err, badVideo, file, cams, modes, opacity, time, timeRow] =
-      "stage cam ref err badVideo file cams modes opacity time timeRow".split(" ").map((id) => document.getElementById(id));
+    const [stage, cam, ref, thumb, err, badVideo, file, lensRow, flip, modes, opacity, time, timeRow] =
+      "stage cam ref thumb err badVideo file lensRow flip modes opacity time timeRow".split(" ").map((id) => document.getElementById(id));
     const refCtx = ref.getContext("2d");
+    const thumbCtx = thumb.getContext("2d");
     const scratch = document.createElement("canvas");
     const scratchCtx = scratch.getContext("2d", { willReadFrequently: true });
 
-    const settings = { deviceId: null, mode: "ghost", opacity: 0.5, ...JSON.parse(localStorage.getItem("reshoot")) };
+    const settings = { deviceId: null, backId: null, mode: "ghost", opacity: 0.5, ...JSON.parse(localStorage.getItem("reshoot")) };
     let frame = null;
     let source = null;
     let stream = null;
+    let active = null;
+    let inputs = [];
+    let lenses = [];
+    let frontId;
     let seeking = false;
     let nextTime = null;
     let saveTimer;
@@ -168,6 +189,10 @@
       scratch.height = Math.round(height * scale);
       scratchCtx.drawImage(image, 0, 0, scratch.width, scratch.height);
       frame = scratchCtx.getImageData(0, 0, scratch.width, scratch.height);
+      thumb.width = scratch.width / 4;
+      thumb.height = scratch.height / 4;
+      thumbCtx.drawImage(scratch, 0, 0, thumb.width, thumb.height);
+      thumb.hidden = false;
       stage.style.setProperty("--aspect", width / height);
       stage.classList.add("framed");
       render();
@@ -233,23 +258,53 @@
       drawSource();
     }
 
+    const backLensId = () =>
+      (lenses.find((lens) => lens.id === settings.backId) ?? lenses.find((lens) => lens.label === "1") ?? lenses[0])?.id;
+
+    function showLenses() {
+      for (const button of lensRow.children) button.setAttribute("aria-pressed", button.value === active);
+      lensRow.hidden = !lenses.some((lens) => lens.id === active);
+      flip.hidden = inputs.length < 2;
+    }
+
     async function startCamera() {
+      active = settings.deviceId;
+      showLenses();
       stream?.getTracks().forEach((track) => track.stop());
       const open = (video) =>
         navigator.mediaDevices.getUserMedia({ audio: false, video: { ...video, width: { ideal: 1920 }, height: { ideal: 1080 } } });
       try {
-        stream = await open(settings.deviceId ? { deviceId: { exact: settings.deviceId } } : ENVIRONMENT).catch((error) => {
+        stream = await open(active ? { deviceId: { exact: active } } : ENVIRONMENT).catch((error) => {
           if (error.name !== "OverconstrainedError") throw error;
+          active = null;
           return open(ENVIRONMENT);
         });
         cam.srcObject = stream;
         err.hidden = true;
-        const current = stream.getVideoTracks()[0].getSettings().deviceId;
-        const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
-        cams.replaceChildren(
-          ...inputs.map((device, i) => new Option(device.label || `Camera ${i + 1}`, device.deviceId, false, device.deviceId === current)),
-        );
-        cams.hidden = false;
+        active ??= stream.getVideoTracks()[0].getSettings().deviceId;
+        inputs = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
+        const ids = Object.fromEntries(inputs.map((device) => [device.label, device.deviceId]));
+        lenses = LENSES.filter((lens) => ids[lens.name]).map((lens) => ({ ...lens, id: ids[lens.name] }));
+        frontId = ids[FRONT];
+        if (!lensRow.childElementCount) {
+          lensRow.append(
+            ...lenses.map(({ label, id }) => {
+              const button = Object.assign(document.createElement("button"), { type: "button", textContent: label, value: id });
+              button.onclick = () => {
+                update({ deviceId: id, backId: id });
+                startCamera();
+              };
+              return button;
+            }),
+          );
+        }
+        // iOS can hand back a virtual multi-lens camera, which jumps between lenses on its own and breaks a fixed framing.
+        const back = backLensId();
+        if (back && settings.deviceId !== back && ![frontId, ...lenses.map((lens) => lens.id)].includes(active)) {
+          update({ deviceId: back });
+          return startCamera();
+        }
+        showLenses();
       } catch (error) {
         err.textContent = !navigator.mediaDevices
           ? "The camera needs a secure (https) connection."
@@ -268,8 +323,9 @@
       modes.append(button);
     }
     opacity.oninput = () => update({ opacity: Number(opacity.value) });
-    cams.onchange = () => {
-      update({ deviceId: cams.value });
+    flip.onclick = () => {
+      const order = lenses.length ? [frontId, backLensId()] : inputs.map((device) => device.deviceId);
+      update({ deviceId: order[(order.indexOf(active) + 1) % order.length] });
       startCamera();
     };
     file.onchange = () => file.files[0] && loadVideo(file.files[0]);
