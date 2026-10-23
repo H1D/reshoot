@@ -68,10 +68,12 @@ const context = await browser.newContext({ viewport: { width: 390, height: 844 }
 await context.addInitScript(() => {
   const currentTime = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime");
   window.seekCount = 0;
+  window.seekedCount = 0;
   Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
     ...currentTime,
     set(value) {
       window.seekCount++;
+      this.addEventListener("seeked", () => window.seekedCount++, { once: true });
       currentTime.set.call(this, value);
     },
   });
@@ -173,11 +175,15 @@ try {
   await page.getByLabel("Video").setInputFiles(fixture);
   check(!(await page.locator("#badVideo").isVisible()), "picking a good video clears the error");
   await eventually(async () => !blank(await canvas()), "reference canvas shows frame 0 after picking a video");
-  const frame0 = await canvas();
   check(Math.abs((await stageAspect()) / (16 / 9) - 1) < 0.01, "stage takes the 16:9 aspect of the reference");
   check(await frameSlider.isVisible(), "frame slider is visible once a video is loaded");
   check((await timeText("now")) === "0:00.00", "the current time reads 0:00.00 once a video is loaded");
   check((await timeText("total")) === "0:03.00", "the duration reads 0:03.00 for the 3 s fixture");
+
+  // Chrome can present frame 1 before the load pauses, so the 0s baseline comes from a seek, as the drag's does.
+  await setSlider(frameSlider, "0");
+  await eventually(() => page.evaluate(() => window.seekedCount > 0), "a seek to 0s completes");
+  const frame0 = await canvas();
   check(
     !(await flipButton(page).isVisible()) && !(await lensRow(page).isVisible()),
     "a single camera with non-iOS labels shows no flip button and no lens pills",
