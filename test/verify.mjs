@@ -398,11 +398,13 @@ try {
   const lowPowerSlider = lowPowerPage.getByRole("slider", { name: "Frame" });
   const storedFrame = () => lowPowerPage.evaluate(() => localStorage.getItem("reshoot-frame"));
   await lowPowerPage.goto(`http://127.0.0.1:${server.address().port}/`);
-  await lowPowerPage.getByLabel("Video").setInputFiles(fixture);
+  await lowPowerPage.getByLabel("Video").setInputFiles(await shotOn("iPhone back triple camera 6.765mm f/1.78", "28"));
   await lowPowerPage.waitForTimeout(1000);
   check((await lowPowerPage.evaluate(() => window.refusedPlays)) > 0, "picking a video without a tap gets play() refused");
   check((await storedFrame()) === null, "a refused play saves no frame");
   check(await tapToShow.isVisible(), "a refused play asks for a tap to show the video");
+  const lowPowerZoom = await lowPowerPage.locator("#cam").evaluate((el) => new DOMMatrix(getComputedStyle(el).transform).a);
+  check(Math.abs(lowPowerZoom - 28 / 24) < 0.01, `the shot's zoom is matched before the tap (zoom ${lowPowerZoom})`);
   check(!(await lowPowerSlider.isVisible()), "the frame slider stays hidden while the video is not shown");
   await screenshot(lowPowerPage, "reshoot-tap-prompt.png");
   await tapToShow.click();

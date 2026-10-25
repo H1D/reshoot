@@ -395,6 +395,10 @@
       tapToShow.hidden = true;
       timeRow.hidden = true;
       showFirstFrame(videoFile);
+      readShot(videoFile).then(
+        (shot) => shot && matchShot(shot),
+        (error) => console.warn("Reshoot could not read the camera tags", error),
+      );
     }
 
     // iOS Safari draws nothing from a video until playback has presented a frame. That frame is frame 0, and
@@ -426,10 +430,6 @@
       total.textContent = stamp(source.duration);
       timeRow.hidden = false;
       drawSource();
-      readShot(videoFile).then(
-        (shot) => shot && matchShot(shot),
-        (error) => console.warn("Reshoot could not read the camera tags", error),
-      );
     }
 
     const backLensId = () =>
